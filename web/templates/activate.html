@@ -1,0 +1,25 @@
+{% extends "_base.html" %}
+
+{% block content %}
+
+<div class="text-center">
+  <h3>Enter your Activation Code and Sign in to your account</h3>
+</div>
+
+<br>
+{% if error %}
+    <div class="alert alert-danger" role="alert">{{ error }}</div>
+{% endif %}
+
+<form action="/activate" method="POST">
+  <div class="form-group">
+    <input name="activation_code" class="form-control input-lg" type="text" placeholder="Enter activation code" required>
+  </div>
+  <input type="submit" class="btn btn-primary btn-lg btn-block" value="Submit">
+</form>
+
+<br>
+<hr>
+
+
+{% endblock %}

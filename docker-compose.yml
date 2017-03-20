@@ -1,0 +1,54 @@
+version: '3.0'
+services:
+
+  web:
+    restart: always
+    build: ./web
+    ports:
+      - "8000"
+    links:
+      - postgres:postgres
+      - redis:redis
+    volumes:
+      - web-volume:/usr/src/app/static
+    env_file: .env
+    command: /usr/local/bin/gunicorn -w 2 -b :8000 app:app
+
+  nginx:
+    restart: always
+    build:
+      context: ./nginx
+      args:
+        PUBLIC_URL: ${PUBLIC_URL}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - web-volume:/usr/src/app/static
+    links:
+      - web:web
+
+  postgres:
+    restart: always
+    build: postgres
+    environment:
+       - POSTGRES_PASSWORD=${DB_PASS}
+    volumes:
+      - database-volume:/var/lib/postgresql
+    ports:
+      - "5432"
+#      - "5432:5432"
+
+  redis:
+    restart: always
+    image: redis:latest
+    volumes:
+      - redis-volume:/var/lib/redis
+    ports:
+      - "6379"
+#      - "6379:6379"
+
+volumes:
+  web-volume:
+  database-volume:
+  redis-volume:
