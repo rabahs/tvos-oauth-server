@@ -58,7 +58,7 @@ s
 - Generate api key and secret for your client app  (make sure to copy the key and secret after your run the command)
 	
 ```
-    docker-compose run --no-deps --rm web python manage.py create_app --name "CloudPhotos"
+    docker-compose run --no-deps --rm web python manage.py create_app --name "TVOSOAUTH"
 
 ```
 

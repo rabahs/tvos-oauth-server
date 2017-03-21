@@ -6,6 +6,8 @@ import logging
 import urllib
 import json
 
+
+import pickle
 import requests
 import redis
 from flask import Flask, flash, request, redirect, render_template, jsonify, g, url_for
@@ -32,51 +34,87 @@ def show_activate():
 
 @app.route('/activate', methods=['POST'])
 def activate():
-    code = request.form['activation_code']
-    if code is None:
+    activation_code = request.form['activation_code']
+    if activation_code is None:
         flash('Activation code is not set', 'danger')
         return redirect(url_for('show_activate'))
 
     # Verify if activation code is in Redis
-    if not app.redis.exists("code:" + code):
+    creds = app.redis.get("code:" + activation_code)
+    if creds is None:
         flash('Activation code is not recognized or expired, try to sign in again', 'danger')
         return redirect(url_for('show_activate'))
-
-    # TODO: Store client_id in db to support multiple accounts
-
+    creds = pickle.loads(creds)
+    provider = creds['provider']
     params = {
-        'client_id': app.config['AWS']['CLIENT_ID'],
-        'scope': 'clouddrive:read_image clouddrive:read_video',
+        'client_id': app.config[provider]['CLIENT_ID'],
         'response_type': 'code',
         'redirect_uri': url_for('authenticated', _external=True, _scheme='https'),
-        'state': code  # pass the activation code as a state
+        'state': activation_code  # pass the activation code as a state
     }
-    url = app.config['AWS']['LOGIN_URL'] + urllib.parse.urlencode(params)
+
+    if 'scope' in creds:
+        params['scope'] = creds['scope']
+
+    url = app.config[provider]['AUTHORIZE_URL'] + urllib.parse.urlencode(params)
     return redirect(url)
 
 
 @app.route('/activate_device', methods=['GET'])
 def activate_device():
+    """ Authorize a user on a device
+        install_id: a unique device id from requesting device
+        provider: oauth2 provider: e.g. 'amazon'
+        scope: requested scope to authorize for
+
+    :return
+         activation_code
+         activation_url
+     """
     authenticate_request()
-    if request.args.get('install_id') is None:
+
+    install_id = request.args.get('install_id')
+    if install_id is None:
         raise ApiError('request missing install_id', 404)
 
-    new_code = ''.join(random.choice('0123456789ABCDEF') for i in range(8))
-    app.logger.warning('code is %s ', new_code)
+    provider = request.args.get('provider')
+    if provider is None:
+        raise ApiError('request missing provider', 404)
+    provider = provider.upper()
 
-    creds = {'activation_code': new_code}
+    activation_code = ''.join(random.choice('0123456789ABCDEF') for i in range(8))
 
-    app.redis.setex("code:" + creds['activation_code'], ACTIVATION_CODE_EXPIRES_IN, creds)
-    app.logger.warning('redis set')
+    creds = {
+    	'activation_code': activation_code,
+        'install_id': install_id,
+        'provider': provider
+    }
+
+    scope = request.args.get('scope')
+    if scope:
+        creds['scope'] = scope
+
+    creds = pickle.dumps(creds)
+
+    app.redis.setex("code:" + activation_code, ACTIVATION_CODE_EXPIRES_IN, creds)
 
     return response(200, payload={
-        'activation_code': creds['activation_code'],
+        'activation_code': activation_code,
         'activation_url': url_for('activate', _external=True, _scheme='https')
     })
 
 
 @app.route('/authenticated')
 def authenticated():
+    """ OAuth2 callback
+            code:
+            state:
+            error:
+            error_description:
+        """
+    if request.args.get('error') is not None:
+        raise ApiError("{0} : {1}".format(request.args.get('error'), request.args.get('error_description')))
+
     auth_code = request.args.get('code')
     if auth_code is None:
         raise ApiError('No OAuth code is passed from provider', 404)
@@ -90,34 +128,50 @@ def authenticated():
     if creds is None:
         raise ApiError('Activation code is not recognized or expired, try to sign in again', 404)
 
-    creds = eval(creds)
+    creds = pickle.loads(creds)
+
+    provider = creds['provider']
+
     # Exchange auth code for tokens
     headers = {'Content-Type': 'application/x-www-form-urlencoded'}
     params = {
         'grant_type': 'authorization_code',
         'code': auth_code,
-        'client_id': app.config['AWS']['CLIENT_ID'],
-        'client_secret': app.config['AWS']['CLIENT_SECRET'],
+        'client_id': app.config[provider]['CLIENT_ID'],
+        'client_secret': app.config[provider]['CLIENT_SECRET'],
         'redirect_uri': url_for('authenticated', _external=True, _scheme='https')
     }
-    res = requests.post(app.config['AWS']['TOKEN_URL'], headers=headers, data=params)
+    res = requests.post(app.config[provider]['TOKEN_URL'], headers=headers, data=params)
     if res is None:
         raise ApiError('Problem authenticating with Amazon', 404)
 
     json_res = res.json()
     creds['access_token'] = json_res['access_token']
-    creds['refresh_token'] = json_res['refresh_token']
-    creds['expires_in'] = json_res['expires_in']
+    if 'refresh_token' in json_res:
+        creds['refresh_token'] = json_res['refresh_token']
+    if 'expires_in' in json_res:
+        creds['expires_in'] = json_res['expires_in']
     creds['token_created_at'] = json.dumps(datetime.now().isoformat())
 
+    creds = pickle.dumps(creds)
     app.redis.setex("code:" + activation_code, ACTIVATION_CODE_EXPIRES_IN, creds)
     flash('You were successfully logged in', 'success')
     return render_template('activated.html')
 
 
-# Get oAuth credentials if ready
+# Poll for OAuth credentials
 @app.route('/oauth', methods=['GET'])
 def oauth():
+    """ An endpoint for devices to periodically poll for oauth credentials (it gets set upon successful login)
+           install_id: a unique device id from requesting device
+       :return
+            access_token
+            refresh_token
+            expires_in
+            created_at
+            client_id
+            client_secret
+        """
     authenticate_request()
     install_id = request.args.get('install_id')
     if install_id is None:
@@ -125,31 +179,35 @@ def oauth():
     activation_code = request.args.get('activation_code')
     if activation_code is None:
         raise ApiError("activation_code is missing", 404)
-
     creds = app.redis.get("code:" + activation_code)
     if creds is None:
         raise ApiError("Not Authorized", 401)
-    creds = eval(creds)
+
+    creds = pickle.loads(creds)
+
+    provider = creds['provider']
     if 'access_token' not in creds:
         return response(202, 'access_token not ready yet for the supplied activation_code')
 
     payload = {
         'access_token': creds['access_token'],
-        'refresh_token': creds['refresh_token'],
-        'expires_in': creds['expires_in'],
         'created_at': creds['token_created_at'],
-        'client_id': app.config['AWS']['CLIENT_ID'],
-        'client_secret': app.config['AWS']['CLIENT_SECRET']
+        'client_id': app.config[provider]['CLIENT_ID'],
+        'client_secret': app.config[provider]['CLIENT_SECRET']
     }
+    if 'refresh_token' in creds:
+        payload['refresh_token'] = creds['refresh_token']
+
+    if 'expires_in' in creds:
+        payload['expires_in'] = creds['expires_in']
+
     return response(200, payload=payload)
 
 
-
 def authenticate_request():
-    api_key = request.headers.get('X-TVOAUTH-API-KEY')
-    api_sig = request.headers.get('X-TVOAUTH-API-SIG')
-    # app.logger.warning('key %s sig %s', api_key, api_sig)
-    # app.logger.warning(request.headers)
+    api_key = request.headers.get('X-TVOSOAUTH-API-KEY')
+    api_sig = request.headers.get('X-TVOSOAUTH-API-SIG')
+
     current_app = db.session.query(App).filter_by(api_key=api_key).one_or_none()
 
     if current_app is None:

@@ -17,12 +17,21 @@ class BaseConfig(object):
     REDIS_HOST = os.environ['REDIS_HOST']
     REDIS_PORT = os.environ['REDIS_PORT']
 
-    AWS = {
+    AMAZON = {
         'CLIENT_ID':  os.environ['AWS_CLIENT_ID'],
         'CLIENT_SECRET': os.environ['AWS_CLIENT_SECRET'],
+        'AUTHORIZE_URL': 'https://www.amazon.com/ap/oa?',
         'TOKEN_URL': 'https://api.amazon.com/auth/o2/token',
-        'LOGIN_URL': 'https://www.amazon.com/ap/oa?'
+        'SCOPE': 'clouddrive:read_image clouddrive:read_video'
     }
+
+    DROPBOX = {
+        'CLIENT_ID':  os.environ['DROPBOX_CLIENT_ID'],
+        'CLIENT_SECRET': os.environ['DROPBOX_CLIENT_SECRET'],
+        'AUTHORIZE_URL': 'https://www.dropbox.com/oauth2/authorize?',
+        'TOKEN_URL': 'https://www.dropbox.com/oauth2/token'
+    }
+
 
     PUBLIC_URL = os.environ['PUBLIC_URL']
 
