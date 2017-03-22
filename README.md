@@ -3,7 +3,9 @@
 Enable users of your tvOS app to authenticate with Amazon (or potentially other oauth services) using an activation code on a mobile or desktop browser.
 
 Comes with docker-compose to easily deploy to any Docker hosting service (e.g AWS or Digital Ocean) 
-s
+
+Also check [tvOS client](https://github.com/rabahs/tvos-oauth)
+
 ![Diagram](tvos_authenticator.png)
  
 ## Production deployment
