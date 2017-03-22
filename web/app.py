@@ -60,11 +60,11 @@ def activate():
     return redirect(url)
 
 
-@app.route('/activate_device', methods=['GET'])
-def activate_device():
+@app.route('/authorize', methods=['GET'])
+def authorize():
     """ Authorize a user on a device
         install_id: a unique device id from requesting device
-        provider: oauth2 provider: e.g. 'amazon'
+        provider: oauth2 provider: e.g. 'amazon', 'dropbox'
         scope: requested scope to authorize for
 
     :return
@@ -75,24 +75,29 @@ def activate_device():
 
     install_id = request.args.get('install_id')
     if install_id is None:
-        raise ApiError('request missing install_id', 404)
+        raise ApiError('request missing install_id', status_code=404)
 
     provider = request.args.get('provider')
     if provider is None:
-        raise ApiError('request missing provider', 404)
+        raise ApiError('request missing provider', status_code=404)
     provider = provider.upper()
 
     activation_code = ''.join(random.choice('0123456789ABCDEF') for i in range(8))
 
     creds = {
-    	'activation_code': activation_code,
+        'activation_code': activation_code,
         'install_id': install_id,
         'provider': provider
     }
 
-    scope = request.args.get('scope')
-    if scope:
-        creds['scope'] = scope
+    if provider == 'AMAZON':
+        scope = request.args.get('scope')
+        if scope:
+            creds['scope'] = scope
+    elif provider == 'DROPBOX':
+        require_role = request.args.get('require_role')
+        if require_role:
+            creds['require_role'] = require_role
 
     creds = pickle.dumps(creds)
 
@@ -113,20 +118,20 @@ def authenticated():
             error_description:
         """
     if request.args.get('error') is not None:
-        raise ApiError("{0} : {1}".format(request.args.get('error'), request.args.get('error_description')))
+        raise ApiError("{0} : {1}".format(request.args.get('error'), request.args.get('error_description')), status_code=404)
 
     auth_code = request.args.get('code')
     if auth_code is None:
-        raise ApiError('No OAuth code is passed from provider', 404)
+        raise ApiError('No OAuth code is passed from provider', status_code=404)
 
     activation_code = request.args.get('state')
     if activation_code is None:
-        raise ApiError('Could not get retrieve state for this auth request', 404)
+        raise ApiError('Could not get retrieve state for this auth request', status_code=404)
 
     # Verify if activation code is valid
     creds = app.redis.get("code:" + activation_code)
     if creds is None:
-        raise ApiError('Activation code is not recognized or expired, try to sign in again', 404)
+        raise ApiError('Activation code is not recognized or expired, try to sign in again', status_code=404)
 
     creds = pickle.loads(creds)
 
@@ -142,10 +147,14 @@ def authenticated():
         'redirect_uri': url_for('authenticated', _external=True, _scheme='https')
     }
     res = requests.post(app.config[provider]['TOKEN_URL'], headers=headers, data=params)
-    if res is None:
-        raise ApiError('Problem authenticating with Amazon', 404)
-
     json_res = res.json()
+
+    if 'error' in json_res:
+        raise ApiError('Provider error: ' + json_res['error'] + ": " + json_res['error_description'], status_code=404)
+
+    if 'access_token' not in json_res:
+        raise ApiError('Problem authenticating with provider' + res.text, status_code=404)
+
     creds['access_token'] = json_res['access_token']
     if 'refresh_token' in json_res:
         creds['refresh_token'] = json_res['refresh_token']
@@ -157,6 +166,41 @@ def authenticated():
     app.redis.setex("code:" + activation_code, ACTIVATION_CODE_EXPIRES_IN, creds)
     flash('You were successfully logged in', 'success')
     return render_template('activated.html')
+
+
+@app.route('/token', methods=['GET'])
+def token():
+
+    authenticate_request()
+
+    install_id = request.args.get('install_id')
+    if install_id is None:
+        raise ApiError('request missing install_id', status_code=404)
+
+    provider = request.args.get('provider')
+    if provider is None:
+        raise ApiError('request missing provider', status_code=404)
+    provider = provider.upper()
+
+    refresh_token = request.args.get('refresh_token')
+    if refresh_token is None:
+        raise ApiError('request missing refresh_token', status_code=404)
+
+    headers = {'Content-Type': 'application/x-www-form-urlencoded'}
+    params = {
+        'grant_type': 'refresh_token',
+        'client_id': app.config[provider]['CLIENT_ID'],
+        'client_secret': app.config[provider]['CLIENT_SECRET'],
+        'refresh_token': refresh_token
+    }
+
+    res = requests.post(app.config[provider]['TOKEN_URL'], headers=headers, data=params)
+
+    json_res = res.json()
+    if 'error' in json_res:
+        raise ApiError('Provider error: ' + json_res['error'] + ": " + json_res['error_description'], status_code=404)
+
+    return response(200, payload=res.json())
 
 
 # Poll for OAuth credentials
@@ -175,13 +219,15 @@ def oauth():
     authenticate_request()
     install_id = request.args.get('install_id')
     if install_id is None:
-        raise ApiError("request missing install_id", 404)
+        raise ApiError("request missing install_id", status_code=404)
+
     activation_code = request.args.get('activation_code')
     if activation_code is None:
-        raise ApiError("activation_code is missing", 404)
+        raise ApiError("activation_code is missing", status_code=404)
+
     creds = app.redis.get("code:" + activation_code)
     if creds is None:
-        raise ApiError("Not Authorized", 401)
+        raise ApiError("Not Authorized", status_code=401)
 
     creds = pickle.loads(creds)
 
@@ -211,14 +257,14 @@ def authenticate_request():
     current_app = db.session.query(App).filter_by(api_key=api_key).one_or_none()
 
     if current_app is None:
-        raise ApiError('Unauthorized', status_code=401)
+        raise ApiError('Unauthorized app', status_code=401)
 
     joined_params = '&'.join('{}&{}'.format(key, val) for key, val in sorted(request.args.items()))
     raw_params = joined_params + "&" + current_app.api_secret
 
     signature = hashlib.sha1(raw_params.encode('utf-8')).hexdigest()
     if signature != api_sig:
-        raise ApiError('Unauthorized', status_code=401)
+        raise ApiError('Unauthorized request', status_code=401)
 
     g.current_app = current_app
 
@@ -254,7 +300,6 @@ class ApiError(Exception):
 def handle_api_error(error):
     res = jsonify(error.to_dict())
     res.status_code = error.status_code
-    res.mimetype = 'application/json'
     return res
 
 
@@ -262,7 +307,6 @@ def handle_api_error(error):
 def internal_server_error(e):
     res = jsonify({'status': 500, 'error': 'internal server error', 'message': e.args[0]})
     res.status_code = 500
-    res.mimetype = 'application/json'
     return res
 
 
